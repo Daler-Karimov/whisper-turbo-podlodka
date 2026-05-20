@@ -1,0 +1,12 @@
+torch
+torchaudio
+
+gradio>=4.0
+transformers>=4.39
+accelerate
+librosa
+soundfile
+huggingface_hub
+psutil
+
+faster-whisper
