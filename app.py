@@ -616,9 +616,9 @@ def _run_all_parallel(
             t0 = time.perf_counter()
             _get_model(label)
             dt = time.perf_counter() - t0
-            print(f"  ✓ {label}  ({dt:.1f}s)")
+            print(f"  [OK] {label}  ({dt:.1f}s)")
         except Exception as e:
-            print(f"  ✗ {label}  ОШИБКА: {e}")
+            print(f"  [ERR] {label}  ОШИБКА: {e}")
 
     print(f"\n[PARALLEL] Запуск транскрибации...\n")
 
@@ -638,7 +638,7 @@ def _run_all_parallel(
             try:
                 res = future.result(timeout=600)
                 results.append(res)
-                status = "✓" if not res["error"] else "✗"
+                status = "[OK]" if not res["error"] else "[ERR]"
                 print(f"  {status} {label}: {res['total_time']:.2f}s")
             except Exception as e:
                 results.append({
@@ -666,7 +666,7 @@ def _run_all_parallel(
         text_parts.append(f"  МОДЕЛЬ {i}: {short_name}")
         text_parts.append(f"{'━'*60}")
         if res["error"]:
-            text_parts.append(f"  ❌ ОШИБКА: {res['error'][:200]}")
+            text_parts.append(f"  [ОШИБКА] {res['error'][:200]}")
         else:
             text_parts.append(res["text"])
         text_parts.append("")
@@ -698,10 +698,10 @@ def _run_all_parallel(
     if successful:
         fastest = sorted(successful, key=lambda r: r["transcribe_time"])
         info_lines.append("")
-        info_lines.append("  🏆 Рейтинг по скорости транскрибации:")
+        info_lines.append("  Рейтинг по скорости транскрибации:")
         for rank, res in enumerate(fastest, 1):
             short = res["model"].split("(")[0].strip()[:35]
-            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f" {rank}.")
+            medal = f" {rank}."
             info_lines.append(f"    {medal} {short}  —  {res['transcribe_time']:.2f}s")
 
     info_lines.append("")
@@ -729,7 +729,7 @@ def _run_all_parallel(
     cublas = _check_cublas_available() if torch.cuda.is_available() else False
     if torch.cuda.is_available() and not cublas:
         info_lines.append("")
-        info_lines.append("  ⚠️ cuBLAS не найден — faster-whisper на CPU")
+        info_lines.append("  cuBLAS не найден — faster-whisper на CPU")
         info_lines.append("  pip install nvidia-cublas-cu12 nvidia-cudnn-cu12")
 
     combined_info = "\n".join(info_lines)
@@ -800,7 +800,7 @@ def transcribe(
         if model_label == MODEL_LABELS[2] and torch.cuda.is_available():
             if not _check_cublas_available():
                 info_parts.append("")
-                info_parts.append("⚠️ faster-whisper на CPU (cuBLAS не найден)")
+                info_parts.append("faster-whisper на CPU (cuBLAS не найден)")
                 info_parts.append("pip install nvidia-cublas-cu12 nvidia-cudnn-cu12")
 
         return text, "\n".join(info_parts)
@@ -828,7 +828,7 @@ def switch_device(new_device: str) -> str:
     global _forced_device
     if new_device == "GPU" and not torch.cuda.is_available():
         _forced_device = "CPU"
-        return "❌ GPU недоступен на этой машине.\n   Работа продолжится на CPU."
+        return "GPU недоступен на этой машине.\n   Работа продолжится на CPU."
 
     old = _forced_device
     _forced_device = new_device
@@ -842,7 +842,7 @@ def switch_device(new_device: str) -> str:
     dtype = _dtype()
 
     lines = [
-        f"🔄 Устройство переключено: {old} → {new_device}",
+        f"Устройство переключено: {old} -> {new_device}",
         f"   Фактическое устройство: {actual}",
         f"   Тип данных: {dtype}",
     ]
@@ -930,7 +930,7 @@ def build_app():
     ) as app:
         gr.Markdown(
             """
-            # 🎙️ Multi-Model Whisper Transcription
+            # Multi-Model Whisper Transcription
 
             Транскрибация аудио тремя вариантами Whisper.
             Режим **«Все модели параллельно»** запускает все 3 модели
@@ -941,7 +941,7 @@ def build_app():
             | 1 | openai/whisper-large-v3-turbo | HF Transformers | ~3 ГБ |
             | 2 | bond005/whisper-podlodka-turbo | HF Transformers | ~3 ГБ |
             | 3 | Podlodka CTranslate2 | faster-whisper | из модели 2 |
-            | ⚡ | **Все параллельно** | сравнение | все сразу |
+            | * | **Все параллельно** | сравнение | все сразу |
             """
         )
 
@@ -949,7 +949,7 @@ def build_app():
             with gr.Column(scale=1, min_width=340):
                 audio_input = gr.Audio(
                     sources=["upload", "microphone"],
-                    type="filepath",          # ← ffmpeg работает с файлом
+                    type="filepath",
                     label="Аудио (загрузите файл или запишите)",
                 )
 
@@ -963,7 +963,7 @@ def build_app():
                 device_radio = gr.Radio(
                     choices=DEVICE_CHOICES,
                     value=_forced_device,
-                    label="⚡ Устройство",
+                    label="Устройство",
                 )
 
                 language_dropdown = gr.Dropdown(
@@ -986,18 +986,18 @@ def build_app():
 
                 with gr.Row():
                     btn_transcribe = gr.Button(
-                        "🎯 Транскрибировать",
+                        "Транскрибировать",
                         variant="primary",
                         scale=3,
                     )
                 with gr.Row():
                     btn_unload = gr.Button(
-                        "🗑️ Выгрузить модели",
+                        "Выгрузить модели",
                         variant="secondary",
                         scale=1,
                     )
                     btn_info = gr.Button(
-                        "📊 Статус",
+                        "Статус",
                         variant="secondary",
                         scale=1,
                     )
@@ -1053,7 +1053,7 @@ if __name__ == "__main__":
         print(f"  cuBLAS       : {'Доступен' if cublas else 'НЕ НАЙДЕН'}")
         if not cublas:
             print()
-            print(f"  ⚠️  cuBLAS не найден — faster-whisper будет на CPU")
+            print(f"  cuBLAS не найден — faster-whisper будет на CPU")
             print(f"  pip install nvidia-cublas-cu12 nvidia-cudnn-cu12")
     else:
         print(f"  GPU          : НЕ ОБНАРУЖЕН — работа на CPU")
