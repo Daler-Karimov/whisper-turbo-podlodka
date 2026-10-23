@@ -1,5 +1,3 @@
-
-
 import gc
 import os
 import subprocess
@@ -14,12 +12,8 @@ import concurrent.futures
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-
-
 GRADIO_CACHE = Path(tempfile.gettempdir()) / "gradio"
 FLAGGED_DIR = Path(__file__).resolve().parent / "flagged"
-
-
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 MODELS_DIR = SCRIPT_DIR / "models"
@@ -29,27 +23,52 @@ os.environ.setdefault("HF_HOME", str(MODELS_DIR))
 os.environ.setdefault("HF_HUB_CACHE", str(MODELS_DIR))
 os.environ.setdefault("TRANSFORMERS_CACHE", str(MODELS_DIR))
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
+os.environ["HF_HUB_DISABLE_SSL_VERIFY"] = "1"
 
 import gradio as gr
 import torch
 
+# ------------------- Локальные папки моделей -------------------
+LOCAL_MODEL_OPENAI = MODELS_DIR / "openai--whisper-large-v3-turbo"
+LOCAL_MODEL_PODLODKA = MODELS_DIR / "bond005--whisper-podlodka-turbo"
 
+def git_clone_if_needed(repo_url: str, local_dir: Path) -> None:
+    """Клонирует репозиторий, если папка отсутствует или пуста."""
+    local_dir = Path(local_dir)
+    if local_dir.exists() and any(local_dir.iterdir()):
+        return
+    print(f"[GIT] Клонирование {repo_url} -> {local_dir}")
+    try:
+        subprocess.run(
+            ["git", "clone", repo_url, str(local_dir)],
+            check=True,
+            capture_output=False,
+            text=True,
+            timeout=1800,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Не удалось клонировать репозиторий {repo_url}: {e}")
+    except FileNotFoundError:
+        raise RuntimeError("Git не найден. Установите git и добавьте его в PATH.")
+    print("[GIT] Клонирование завершено.")
 
-HF_MODEL_OPENAI = "openai/whisper-large-v3-turbo"
-HF_MODEL_PODLODKA = "bond005/whisper-podlodka-turbo"
+# Клонируем обе модели при старте (если ещё нет)
+try:
+    git_clone_if_needed("https://huggingface.co/openai/whisper-large-v3-turbo", LOCAL_MODEL_OPENAI)
+    git_clone_if_needed("https://huggingface.co/bond005/whisper-podlodka-turbo", LOCAL_MODEL_PODLODKA)
+except Exception as e:
+    print(f"[!] Критическая ошибка при подготовке моделей: {e}")
+    sys.exit(1)
 
-
+HF_MODEL_OPENAI = str(LOCAL_MODEL_OPENAI)   # локальный путь
+HF_MODEL_PODLODKA = str(LOCAL_MODEL_PODLODKA)
 
 MODEL_LABELS = [
     "openai whisper-large-v3-turbo (Transformers)",
     "bond005 whisper-podlodka-turbo (Transformers)",
     "Podlodka-Turbo CTranslate2 (faster-whisper)",
 ]
-
-
 PARALLEL_LABEL = "ВСЕ МОДЕЛИ ПАРАЛЛЕЛЬНО (сравнение)"
-
-
 ALL_MODEL_CHOICES = MODEL_LABELS + [PARALLEL_LABEL]
 
 LANGUAGE_OPTIONS = [
@@ -69,14 +88,11 @@ LANG_CODE: Dict[str, str] = {
     "finnish": "fi",
 }
 
-
-
 _cache: Dict[str, Any] = {}
 _cublas_check_result: Optional[bool] = None
 _model_load_lock = threading.Lock()
 
 _forced_device: str = "GPU" if torch.cuda.is_available() else "CPU"
-
 DEVICE_CHOICES = ["CPU", "GPU"]
 
 
@@ -106,18 +122,11 @@ def _get_vram_total_gb() -> float:
 def _get_gpu_memory_info() -> Dict[str, float]:
     if not torch.cuda.is_available():
         return {"total": 0, "allocated": 0, "reserved": 0, "free": 0}
-
     total = _get_vram_total_gb()
     allocated = torch.cuda.memory_allocated(0) / 1_073_741_824
     reserved = torch.cuda.memory_reserved(0) / 1_073_741_824
     free = total - reserved
-
-    return {
-        "total": total,
-        "allocated": allocated,
-        "reserved": reserved,
-        "free": free,
-    }
+    return {"total": total, "allocated": allocated, "reserved": reserved, "free": free}
 
 
 def _get_ram_info() -> Dict[str, float]:
@@ -138,11 +147,9 @@ def _check_cublas_available() -> bool:
     global _cublas_check_result
     if _cublas_check_result is not None:
         return _cublas_check_result
-
     if not torch.cuda.is_available():
         _cublas_check_result = False
         return False
-
     result = _do_check_cublas()
     _cublas_check_result = result
     return result
@@ -285,28 +292,30 @@ def _do_check_cublas() -> bool:
     return False
 
 
-
-
-
-def _load_hf_pipeline(model_id: str):
+# ------------------- Загрузка моделей -------------------
+def _load_hf_pipeline(model_path: str):
     from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
     device = _device()
     dtype = _dtype()
 
     print(f"\n{'='*60}")
-    print(f"[MODEL] Загрузка: {model_id}")
+    print(f"[MODEL] Загрузка: {model_path}")
     print(f"[MODEL] Устройство: {device}, dtype: {dtype}")
     print(f"{'='*60}\n")
 
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_id, torch_dtype=dtype, low_cpu_mem_usage=True,
-        use_safetensors=True, cache_dir=str(MODELS_DIR),
+        model_path,
+        torch_dtype=dtype,
+        low_cpu_mem_usage=True,
+        use_safetensors=True,
+        local_files_only=True,          # никаких сетевых запросов
     )
     model.to(device)
 
     processor = AutoProcessor.from_pretrained(
-        model_id, cache_dir=str(MODELS_DIR),
+        model_path,
+        local_files_only=True,
     )
 
     pipe = pipeline(
@@ -317,47 +326,39 @@ def _load_hf_pipeline(model_id: str):
         torch_dtype=dtype,
         device=device,
     )
-    print(f"[MODEL] {model_id} загружена!\n")
+    print(f"[MODEL] {model_path} загружена!\n")
     return pipe
 
 
-def _ensure_ct2_files(model_id: str, output_dir: Path):
-    try:
-        from huggingface_hub import hf_hub_download
-        needed = [
-            "tokenizer.json", "preprocessor_config.json", "config.json",
-            "tokenizer_config.json", "special_tokens_map.json",
-            "added_tokens.json", "normalizer.json", "vocab.json", "merges.txt",
-        ]
-        for fname in needed:
-            target = output_dir / fname
-            if not target.exists():
-                try:
-                    src = hf_hub_download(
-                        repo_id=model_id, filename=fname,
-                        cache_dir=str(MODELS_DIR),
-                    )
-                    shutil.copy2(src, str(target))
-                except Exception:
-                    pass
-    except Exception:
-        pass
+def _ensure_ct2_files(source_model_dir: Path, output_dir: Path):
+    needed = [
+        "tokenizer.json", "preprocessor_config.json", "config.json",
+        "tokenizer_config.json", "special_tokens_map.json",
+        "added_tokens.json", "normalizer.json", "vocab.json", "merges.txt",
+    ]
+    source = Path(source_model_dir)
+    dest = Path(output_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    for fname in needed:
+        src_file = source / fname
+        dst_file = dest / fname
+        if src_file.exists() and not dst_file.exists():
+            shutil.copy2(str(src_file), str(dst_file))
 
 
-def _convert_whisper_to_ct2(model_id: str, output_dir: Path):
+def _convert_whisper_to_ct2(local_model_path: str, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
-
     quantization = "float16" if torch.cuda.is_available() else "int8"
-    print(f"\n[CONVERT] {model_id} -> CTranslate2 ({quantization})...")
+    print(f"\n[CONVERT] {local_model_path} -> CTranslate2 ({quantization})...")
 
     errors: list = []
 
     try:
         from ctranslate2.converters import TransformersConverter
-        converter = TransformersConverter(model_id)
+        converter = TransformersConverter(local_model_path)
         converter.convert(str(output_dir), quantization=quantization, force=True)
         if (output_dir / "model.bin").exists():
-            _ensure_ct2_files(model_id, output_dir)
+            _ensure_ct2_files(Path(local_model_path), output_dir)
             return
         errors.append("TransformersConverter: model.bin не создан")
     except (ImportError, Exception) as e:
@@ -367,10 +368,10 @@ def _convert_whisper_to_ct2(model_id: str, output_dir: Path):
         try:
             mod = __import__(imp, fromlist=["WhisperConverter"])
             WC = getattr(mod, "WhisperConverter")
-            converter = WC(model_id)
+            converter = WC(local_model_path)
             converter.convert(str(output_dir), quantization=quantization, force=True)
             if (output_dir / "model.bin").exists():
-                _ensure_ct2_files(model_id, output_dir)
+                _ensure_ct2_files(Path(local_model_path), output_dir)
                 return
         except (ImportError, AttributeError, Exception) as e:
             errors.append(f"WhisperConverter({imp}): {e}")
@@ -381,12 +382,12 @@ def _convert_whisper_to_ct2(model_id: str, output_dir: Path):
     ]:
         try:
             result = subprocess.run(
-                cmd + ["--model", model_id, "--output_dir", str(output_dir),
+                cmd + ["--model", local_model_path, "--output_dir", str(output_dir),
                        "--quantization", quantization, "--force"],
                 capture_output=True, text=True, timeout=1800,
             )
             if result.returncode == 0 and (output_dir / "model.bin").exists():
-                _ensure_ct2_files(model_id, output_dir)
+                _ensure_ct2_files(Path(local_model_path), output_dir)
                 return
             errors.append(f"{cmd[0]}: rc={result.returncode}")
         except Exception as e:
@@ -403,7 +404,6 @@ def _determine_faster_whisper_device() -> Tuple[str, str]:
         return "cpu", "int8"
     if _check_cublas_available():
         return "cuda", "float16"
-
     print("\n[!] cuBLAS не найден — faster-whisper на CPU")
     print("    pip install nvidia-cublas-cu12 nvidia-cudnn-cu12\n")
     return "cpu", "int8"
@@ -468,46 +468,40 @@ def _get_model(label: str):
         return obj
 
 
-
-
+# ------------------- Транскрибация (ffmpeg внутри pipeline) -------------------
 def _transcribe_hf(
-    pipe, audio_path: str, language: str, task: str, timestamps: bool,
+    pipe, audio_path: str, language: str, task: str, timestamps: bool
 ) -> Tuple[str, str]:
     generate_kwargs: Dict[str, Any] = {"task": task}
     if language != "auto":
         generate_kwargs["language"] = language
 
     result = pipe(
-        audio_path, generate_kwargs=generate_kwargs, return_timestamps=True,
+        audio_path, generate_kwargs=generate_kwargs, return_timestamps=True
     )
 
     if timestamps and "chunks" in result:
-        lines = []
-        for chunk in result["chunks"]:
-            t_start, t_end = chunk.get("timestamp", (None, None))
-            s = f"{t_start:.2f}" if t_start is not None else "?"
-            e = f"{t_end:.2f}" if t_end is not None else "?"
-            lines.append(f"[{s}s → {e}s]  {chunk['text'].strip()}")
+        lines = [
+            f"[{chunk['timestamp'][0]:.2f}s → {chunk['timestamp'][1]:.2f}s]  {chunk['text'].strip()}"
+            for chunk in result["chunks"]
+        ]
         return "\n".join(lines), ""
 
     return result["text"], ""
 
 
 def _transcribe_faster(
-    model, audio_path: str, language: str, task: str, timestamps: bool,
+    model, audio_path: str, language: str, task: str, timestamps: bool
 ) -> Tuple[str, str]:
     lang = LANG_CODE.get(language, language) if language != "auto" else None
 
     try:
-        segments_gen, info = model.transcribe(
-            audio_path, language=lang, task=task,
-        )
+        segments_gen, info = model.transcribe(audio_path, language=lang, task=task)
         segments = list(segments_gen)
     except RuntimeError as e:
         err_msg = str(e).lower()
         if "cublas" in err_msg or "cuda" in err_msg or "cudnn" in err_msg:
             from faster_whisper import WhisperModel
-
             ct2_dir = MODELS_DIR / "ct2" / "whisper-podlodka-turbo-ct2"
             model_path = (
                 str(ct2_dir)
@@ -516,9 +510,8 @@ def _transcribe_faster(
             )
             new_model = WhisperModel(model_path, device="cpu", compute_type="int8")
             _cache[MODEL_LABELS[2]] = new_model
-
             segments_gen, info = new_model.transcribe(
-                audio_path, language=lang, task=task,
+                audio_path, language=lang, task=task
             )
             segments = list(segments_gen)
         else:
@@ -603,15 +596,12 @@ def _run_single_transcription(
     return result
 
 
-
-
 def _run_all_parallel(
     audio_path: str,
     language: str,
     task: str,
     timestamps: bool,
 ) -> Tuple[str, str]:
-
     ram_before = _get_ram_info()
     gpu_before = _get_gpu_memory_info()
     wall_start = time.perf_counter()
@@ -634,9 +624,7 @@ def _run_all_parallel(
 
     results: List[Dict[str, Any]] = []
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=len(MODEL_LABELS)
-    ) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(MODEL_LABELS)) as executor:
         future_to_label = {}
         for label in MODEL_LABELS:
             future = executor.submit(
@@ -677,12 +665,10 @@ def _run_all_parallel(
         text_parts.append(f"{'━'*60}")
         text_parts.append(f"  МОДЕЛЬ {i}: {short_name}")
         text_parts.append(f"{'━'*60}")
-
         if res["error"]:
             text_parts.append(f"  ❌ ОШИБКА: {res['error'][:200]}")
         else:
             text_parts.append(res["text"])
-
         text_parts.append("")
 
     combined_text = "\n".join(text_parts)
@@ -693,7 +679,6 @@ def _run_all_parallel(
     info_lines.append(f"{'═'*50}")
     info_lines.append(f"  Общее время (wall clock): {wall_total:.2f} сек")
     info_lines.append("")
-
     info_lines.append(f"  {'Модель':<45} {'Загр.':<8} {'Транс.':<8} {'Итого':<8}")
     info_lines.append(f"  {'─'*45} {'─'*8} {'─'*8} {'─'*8}")
 
@@ -717,15 +702,12 @@ def _run_all_parallel(
         for rank, res in enumerate(fastest, 1):
             short = res["model"].split("(")[0].strip()[:35]
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f" {rank}.")
-            info_lines.append(
-                f"    {medal} {short}  —  {res['transcribe_time']:.2f}s"
-            )
+            info_lines.append(f"    {medal} {short}  —  {res['transcribe_time']:.2f}s")
 
     info_lines.append("")
     info_lines.append(f"  {'─'*50}")
     info_lines.append(f"  РЕСУРСЫ:")
 
-    device_name = "CPU"
     if torch.cuda.is_available():
         device_name = f"GPU: {torch.cuda.get_device_name(0)}"
         info_lines.append(f"  {device_name}")
@@ -735,7 +717,7 @@ def _run_all_parallel(
             f"  (из {gpu_before['total']:.1f} ГБ)"
         )
     else:
-        info_lines.append(f"  {device_name}")
+        info_lines.append(f"  CPU")
 
     if ram_before["total"] > 0:
         info_lines.append(
@@ -748,17 +730,11 @@ def _run_all_parallel(
     if torch.cuda.is_available() and not cublas:
         info_lines.append("")
         info_lines.append("  ⚠️ cuBLAS не найден — faster-whisper на CPU")
-        info_lines.append(
-            "  pip install nvidia-cublas-cu12 nvidia-cudnn-cu12"
-        )
+        info_lines.append("  pip install nvidia-cublas-cu12 nvidia-cudnn-cu12")
 
     combined_info = "\n".join(info_lines)
-
     print(f"\n[PARALLEL] Завершено за {wall_total:.2f}s\n")
-
     return combined_text, combined_info
-
-
 
 
 def transcribe(
@@ -824,12 +800,8 @@ def transcribe(
         if model_label == MODEL_LABELS[2] and torch.cuda.is_available():
             if not _check_cublas_available():
                 info_parts.append("")
-                info_parts.append(
-                    "⚠️ faster-whisper на CPU (cuBLAS не найден)"
-                )
-                info_parts.append(
-                    "pip install nvidia-cublas-cu12 nvidia-cudnn-cu12"
-                )
+                info_parts.append("⚠️ faster-whisper на CPU (cuBLAS не найден)")
+                info_parts.append("pip install nvidia-cublas-cu12 nvidia-cudnn-cu12")
 
         return text, "\n".join(info_parts)
 
@@ -854,14 +826,12 @@ def unload_all_models() -> str:
 
 def switch_device(new_device: str) -> str:
     global _forced_device
-
     if new_device == "GPU" and not torch.cuda.is_available():
         _forced_device = "CPU"
         return "❌ GPU недоступен на этой машине.\n   Работа продолжится на CPU."
 
     old = _forced_device
     _forced_device = new_device
-
     count = len(_cache)
     _cache.clear()
     gc.collect()
@@ -876,7 +846,6 @@ def switch_device(new_device: str) -> str:
         f"   Фактическое устройство: {actual}",
         f"   Тип данных: {dtype}",
     ]
-
     if count > 0:
         lines.append(f"   Выгружено моделей: {count} (будут перезагружены)")
 
@@ -913,7 +882,6 @@ def show_models_info() -> str:
         lines.append(f"Общий размер: {size_str}  ({file_count} файлов)")
     else:
         lines.append("Модели ещё не скачаны.")
-
     lines.append("")
 
     if torch.cuda.is_available():
@@ -940,16 +908,12 @@ def show_models_info() -> str:
 
     ct2_dir = MODELS_DIR / "ct2" / "whisper-podlodka-turbo-ct2"
     ct2_ready = (ct2_dir / "model.bin").exists()
-
     lines.append(f"\nМодели в памяти:")
     loaded = list(_cache.keys())
     for label in MODEL_LABELS:
         status = " ← загружена" if label in loaded else ""
         lines.append(f"  [{'+' if label in loaded else ' '}] {label}{status}")
-
-    lines.append(
-        f"\nCT2: {'готова' if ct2_ready else 'не конвертирована'}"
-    )
+    lines.append(f"\nCT2: {'готова' if ct2_ready else 'не конвертирована'}")
 
     if not cublas_ok and torch.cuda.is_available():
         lines.append("")
@@ -959,14 +923,11 @@ def show_models_info() -> str:
     return "\n".join(lines)
 
 
-
-
 def build_app():
     with gr.Blocks(
         title="Whisper Multi-Model Transcription",
         analytics_enabled=False,
     ) as app:
-
         gr.Markdown(
             """
             # 🎙️ Multi-Model Whisper Transcription
@@ -988,7 +949,7 @@ def build_app():
             with gr.Column(scale=1, min_width=340):
                 audio_input = gr.Audio(
                     sources=["upload", "microphone"],
-                    type="filepath",
+                    type="filepath",          # ← ffmpeg работает с файлом
                     label="Аудио (загрузите файл или запишите)",
                 )
 
@@ -1071,7 +1032,6 @@ def build_app():
     return app
 
 
-
 if __name__ == "__main__":
     if GRADIO_CACHE.exists():
         print(f"[INFO] Очистка кэша Gradio: {GRADIO_CACHE}")
@@ -1115,5 +1075,6 @@ if __name__ == "__main__":
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,
-        share=False,
+        share=True,
+        inbrowser=True,
     )

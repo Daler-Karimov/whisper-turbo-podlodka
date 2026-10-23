@@ -3,9 +3,16 @@ chcp 65001 >nul 2>&1
 cd /d "%~dp0"
 
 echo ==================================================
-echo   Whisper Multi-Model Transcription (CPU)
+echo   Whisper Multi-Model Transcription
 echo ==================================================
 echo.
+
+where python >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Python not found in PATH. Please install Python and add it to PATH.
+    pause
+    exit /b 1
+)
 
 if not exist "models" (
     echo [INFO] Creating models folder...
@@ -16,6 +23,29 @@ set "HF_HOME=%~dp0models"
 set "HF_HUB_CACHE=%~dp0models"
 set "TRANSFORMERS_CACHE=%~dp0models"
 set "WHISPER_MODELS_DIR=%~dp0models"
+
+if not exist "venv\Scripts\activate.bat" (
+    echo [INFO] Virtual environment not found. Creating venv...
+    python -m venv --system-site-packages venv
+    if errorlevel 1 (
+        echo [ERROR] Failed to create virtual environment.
+        pause
+        exit /b 1
+    )
+    echo [INFO] Activating venv and installing requirements...
+    call venv\Scripts\activate.bat
+    python -m pip install --upgrade pip
+    pip install -r requirements.txt
+    if errorlevel 1 (
+        echo [ERROR] Failed to install requirements.
+        pause
+        exit /b 1
+    )
+    echo [INFO] Requirements installed successfully.
+    echo.
+) else (
+    call venv\Scripts\activate.bat
+)
 
 echo [INFO] Python:
 python --version
@@ -28,10 +58,10 @@ echo.
 echo --------------------------------------------------
 echo [INFO] Models dir: %~dp0models
 echo [INFO] Starting app...
-echo [INFO] Open in browser: http://localhost:7860
+echo [INFO] Local URL: http://localhost:7860
+echo [INFO] Public Gradio link will be displayed below...
 echo.
 echo [!] First run will download model (1-6 GB).
-echo [!] CPU transcription is slower than GPU.
 echo --------------------------------------------------
 echo.
 
